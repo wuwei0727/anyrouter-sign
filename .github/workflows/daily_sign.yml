@@ -1,17 +1,19 @@
 name: AnyRouter Daily Checkin
+
 on:
   schedule:
     # 北京时间 周一至周五 10:00 (UTC 02:00)
     - cron: '0 2 * * 1-5'
     # 北京时间 周六、周日 19:00 (UTC 11:00)
     - cron: '0 11 * * 6,0'
-  workflow_dispatch: # 允许手动运行
+  
+  workflow_dispatch:
 
 jobs:
   checkin:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,14 +21,17 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '24' # Node 24
+          node-version: '24'
+      
+      - name: Install Dependencies
+        run: npm install axios
 
       - name: Run Checkin Script
         env:
-          # 在 GitHub 仓库 Settings -> Secrets and variables -> Actions 中配置这些
+          # 核心账号变量
           NEW_API_USER: ${{ secrets.NEW_API_USER }}
           COOKIE: ${{ secrets.COOKIE }}
-          WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
-          WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
+          
+          # Server酱 变量 (请在 Secrets 里添加这个 Key)
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
         run: node checkin.js
-
