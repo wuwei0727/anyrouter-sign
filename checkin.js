@@ -1,9 +1,7 @@
 /**
- * AnyRouter 自动签到脚本 (Node.js 版)
- * 功能：自动过阿里云 WAF 盾 -> 查询余额 -> 签到 -> 推送消息
+ * AnyRouter 自动签到脚本 (Node.js 版 - Server酱版)
+ * 功能：自动过阿里云 WAF 盾 -> 查询余额 -> 签到 -> Server酱推送
  */
-
-const fs = require('fs');
 
 // ================= 配置区 =================
 const BASE_URL = "https://anyrouter.top";
@@ -16,8 +14,8 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 // 环境变量
 const NEW_API_USER = process.env.NEW_API_USER;
 const USER_COOKIE = process.env.COOKIE;
-const WXPUSHER_APP_TOKEN = process.env.WXPUSHER_APP_TOKEN;
-const WXPUSHER_UID = process.env.WXPUSHER_UID;
+// 修改：使用 Server酱 Key
+const SERVERCHAN_SENDKEY = process.env.SERVERCHAN_SENDKEY;
 
 // 日志存储
 const logContent = [];
@@ -36,7 +34,7 @@ async function main() {
   // 1. 检查环境变量
   if (!NEW_API_USER || !USER_COOKIE) {
     log("❌ 错误：未检测到环境变量 NEW_API_USER 或 COOKIE");
-    await sendWxPusherNotification();
+    await sendServerChanNotification();
     process.exit(1);
   }
 
@@ -47,7 +45,7 @@ async function main() {
     
     if (!wafCookie) {
       log(`❌ WAF 验证失败: ${error}`);
-      await sendWxPusherNotification();
+      await sendServerChanNotification();
       process.exit(1);
     }
     log(`✅ WAF Token 获取成功: ${wafCookie.split(';')[0]}`);
@@ -77,7 +75,7 @@ async function main() {
     console.error(e);
   } finally {
     // 5. 发送通知
-    await sendWxPusherNotification();
+    await sendServerChanNotification();
   }
 }
 
@@ -141,50 +139,54 @@ async function signIn(headers) {
   }
 }
 
-async function sendWxPusherNotification() {
-  if (!WXPUSHER_APP_TOKEN || !WXPUSHER_UID) {
-    console.log("⚠️ 未配置 WxPusher 参数，跳过推送");
+// ================= Server酱 通知逻辑 (修改部分) =================
+
+async function sendServerChanNotification() {
+  if (!SERVERCHAN_SENDKEY) {
+    console.log("⚠️ 未配置 SERVERCHAN_SENDKEY，跳过推送");
     return;
   }
 
-  // 格式化 HTML 内容
-  const linesHtml = logContent.map(line => {
-    if (line.includes("✅")) return `<span style="color:green;">${line}</span>`;
-    if (line.includes("❌")) return `<span style="color:red;">${line}</span>`;
-    if (line.includes("💰") || line.includes("💵")) return `<span style="color:orange;">${line}</span>`;
+  // 格式化 Markdown 内容
+  // Server酱支持 Markdown，比 HTML 更适合
+  const markdownLines = logContent.map(line => {
+    if (line.includes("✅")) return `**${line}**`; // 加粗
+    if (line.includes("❌")) return `**${line}**`; // 加粗
+    if (line.includes("💰") || line.includes("💵")) return `\`${line}\``; // 代码块高亮
     return line;
   });
 
-  const body = {
-    appToken: WXPUSHER_APP_TOKEN,
-    content: linesHtml.join("<br>"),
-    summary: "AnyRouter 签到结果通知",
-    contentType: 2, // HTML
-    uids: [WXPUSHER_UID]
-  };
+  const title = logContent.some(l => l.includes("✅ 签到结果")) ? "AnyRouter 签到成功" : "AnyRouter 签到通知";
+  
+  // 构造 URL 参数
+  const params = new URLSearchParams({
+      'title': title,
+      'desp': markdownLines.join("\n\n") // Markdown 换行需要两个换行符
+  });
 
   try {
-    const resp = await fetch("http://wxpusher.zjiecode.com/api/send/message", {
+    const url = `https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send`;
+    const resp = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params
     });
+    
     const resJson = await resp.json();
-    if (resJson.code === 1000) {
-      console.log("✅ WxPusher 推送发送成功");
+    if (resJson.code === 0) {
+      console.log("✅ Server酱 推送发送成功");
     } else {
-      console.log(`❌ WxPusher 发送失败: ${resJson.msg}`);
+      console.log(`❌ Server酱 发送失败: ${JSON.stringify(resJson)}`);
     }
   } catch (e) {
     console.log(`❌ 发送通知异常: ${e.message}`);
   }
 }
 
-// ================= WAF 解密逻辑 =================
+// ================= WAF 解密逻辑 (完全保留) =================
 
 async function getDynamicCookie(targetUrl) {
   try {
-    // 第一次请求，获取含混淆JS的HTML
     const challengeResp = await fetch(targetUrl, {
       method: 'GET',
       headers: {
@@ -194,12 +196,9 @@ async function getDynamicCookie(targetUrl) {
     });
 
     const html = await challengeResp.text();
-    
-    // 如果没有 script 且是 JSON，说明可能不需要盾
     if (!html.includes('<script')) {
        return { cookie: 'ALREADY_PASS', error: null };
     }
-
     return extractCookieFromHtml(html);
   } catch (err) {
     return { cookie: null, error: String(err) };
@@ -207,7 +206,6 @@ async function getDynamicCookie(targetUrl) {
 }
 
 function extractCookieFromHtml(html) {
-  // 匹配内联 script
   const scriptRegex = /<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/gi;
   const scripts = [...html.matchAll(scriptRegex)];
   
@@ -216,7 +214,6 @@ function extractCookieFromHtml(html) {
   let lastError = null;
   for (const match of scripts) {
     const scriptContent = match[1];
-    // 阿里云 WAF 特征：包含 arg1 或 eval
     if (scriptContent.includes('arg1') || scriptContent.includes('eval') || scriptContent.length > 500) {
         const { cookie, error } = executeScriptForCookie(scriptContent);
         if (cookie) return { cookie, error: null };
@@ -228,10 +225,6 @@ function extractCookieFromHtml(html) {
 
 function executeScriptForCookie(scriptContent) {
   let cookieValue = null;
-
-  // --- 模拟浏览器环境 ---
-  // Node.js 没有 window/document，必须手动 Mock 
-  // 这里的对象属性是根据 WAF 脚本的检测点反推出来的
   const windowMock = {};
   const documentMock = {
     _cookie: '',
@@ -253,17 +246,12 @@ function executeScriptForCookie(scriptContent) {
   const screenMock = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1040, colorDepth: 24 };
 
   try {
-    // 使用 new Function 创建沙箱环境
-    // 注意：我们将 Mock 对象作为参数传入，模拟全局变量
     const run = new Function('window', 'document', 'location', 'navigator', 'screen', `
       try { 
         ${scriptContent} 
-      } catch(e) { 
-        // 忽略脚本执行中的非关键错误
-      }
+      } catch(e) { }
     `);
     
-    // 处理循环引用
     windowMock.window = windowMock;
     windowMock.document = documentMock;
     windowMock.location = documentMock.location;
