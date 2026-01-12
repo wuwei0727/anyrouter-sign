@@ -1,0 +1,32 @@
+name: AnyRouter Daily Sign
+
+on:
+  # 每天北京时间 08:00 (UTC 00:00) 运行
+  schedule:
+    - cron: '0 0 * * *'
+  # 允许手动触发
+  workflow_dispatch:
+
+jobs:
+  sign-in:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Run Sign Script
+        env:
+          # 这里将 GitHub Secrets 映射到脚本的环境变量
+          NEW_API_USER: ${{ secrets.NEW_API_USER }}
+          COOKIE: ${{ secrets.COOKIE }}
+        run: python anyrouter-sign.py
