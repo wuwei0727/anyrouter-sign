@@ -5,7 +5,7 @@ import datetime
 
 # ================= 配置区 =================
 # 1. 基础接口配置
-BASE_URL = "https://anyrouter-zamftesyrayd.wuwei0727.deno.net/api/user"
+BASE_URL = "https://a-ocnfniawgw.cn-shanghai.fcapp.run/api/user"
 SIGN_IN_URL = f"{BASE_URL}/sign_in"
 SELF_INFO_URL = f"{BASE_URL}/self"
 
@@ -144,3 +144,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
