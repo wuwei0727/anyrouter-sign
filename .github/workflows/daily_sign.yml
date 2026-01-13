@@ -2,10 +2,11 @@ name: AnyRouter Daily Checkin
 
 on:
   schedule:
+    - cron: '*/5 * * * *'
     # 北京时间 周一至周五 10:00 (UTC 02:00)
-    - cron: '0 2 * * 1-5'
+    # - cron: '0 2 * * 1-5'
     # 北京时间 周六、周日 19:00 (UTC 11:00)
-    - cron: '0 11 * * 6,0'
+    # - cron: '0 11 * * 6,0'
   
   workflow_dispatch:
 
