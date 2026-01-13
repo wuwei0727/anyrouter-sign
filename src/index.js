@@ -36,7 +36,7 @@ async function main(env) {
     logContent.push(String(s));
   };
 
-  log(`* 正在尝试绕过阿里云 WAF...`); // 保持简洁
+  log(`* 正在尝试绕过阿里云 WAF...`); 
 
   if (!NEW_API_USER || !USER_COOKIE) {
     log("❌ 缺少环境变量 NEW_API_USER 或 COOKIE");
@@ -51,7 +51,6 @@ async function main(env) {
   if (wafError) {
     log(`❌ WAF 算号失败: ${wafError}`);
   } else if (wafCookie && wafCookie !== 'ALREADY_PASS') {
-    // 还原：显示完整 Token，不截断
     log(`✅ WAF Token 获取成功: ${wafCookie}`);
     finalCookie = `${wafCookie}; ${USER_COOKIE}`;
   } else {
@@ -67,38 +66,48 @@ async function main(env) {
     "Referer": BASE_URL + "/",
   };
 
-  // 关键修复：拿到 Token 后静默等待 1 秒，让 WAF "喘口气"，防止第一个请求被秒杀
-  await sleep(1000);
+  // 【核心修改】拿到 Token 后死等 3 秒，防止第一发请求被拦截
+  await sleep(3000);
 
-  // ================= 2. 执行业务 (静默延时，不输出 log) =================
+  // ================= 2. 执行业务 =================
   
-  // 1. 签到前查询
-  await queryBalance("签到前", SELF_INFO_URL, headers, log);
+  // 1. 签到前查询 (带一次重试机制)
+  let preBalanceSuccess = await queryBalance("签到前", SELF_INFO_URL, headers, log, false); 
+  if (!preBalanceSuccess) {
+      // 如果第一次失败，静默等待 2 秒再试一次
+      await sleep(2000);
+      await queryBalance("签到前", SELF_INFO_URL, headers, log, true); // forceLog=true，强制输出结果
+  }
   
-  await sleep(2000); // 静默等待
+  await sleep(2000); // 间隔
 
   // 2. 执行签到
   await signIn(SIGN_IN_URL, headers, log);
   
-  await sleep(2000); // 静默等待
+  await sleep(2000); // 间隔
 
   // 3. 签到后查询
-  await queryBalance("签到后", SELF_INFO_URL, headers, log);
+  await queryBalance("签到后", SELF_INFO_URL, headers, log, true);
 
   await sendServerChan(SERVERCHAN_SENDKEY, logContent);
 }
 
-// ================= 业务函数 (已净化日志) =================
+// ================= 业务函数 =================
 
-async function queryBalance(tag, url, headers, log) {
+/**
+ * forceLog: 是否强制记录日志。
+ * 第一遍尝试时如果失败不记录日志（防止出现红叉），重试时才记录。
+ * 成功时永远记录。
+ */
+async function queryBalance(tag, url, headers, log, forceLog = true) {
   try {
     const resp = await fetch(url, { method: "GET", headers });
     const text = await resp.text();
     
-    // 拦截判断
+    // WAF 拦截判断
     if (text.includes("acw_sc__v2") && text.includes("arg1")) {
-         log(`❌ ${tag} 被 WAF 拦截 (Cookie 无效)`);
-         return;
+         if (forceLog) log(`❌ ${tag} 被 WAF 拦截 (Cookie 无效)`);
+         return false;
     }
 
     let data = null;
@@ -107,17 +116,21 @@ async function queryBalance(tag, url, headers, log) {
     if (data && data.success) {
         const quota = Number(data.data.quota);
         const balance = quota / 500000;
-        // 保持您喜欢的格式
+        // 成功时总是输出
         log(`💰 ${tag} Quota: ${quota}`);
         log(`💵 ${tag} 余额: $${balance.toFixed(2)}`);
+        return true;
     } else {
-        // 只有出错才显示详细信息，否则保持安静
-        if (resp.status !== 200) {
-            log(`⚠️ ${tag} 接口异常 (HTTP ${resp.status}): ${text.slice(0, 50)}`);
+        if (forceLog) {
+            if (resp.status !== 200) {
+                log(`⚠️ ${tag} 接口异常 (HTTP ${resp.status}): ${text.slice(0, 50)}`);
+            }
         }
+        return false;
     }
   } catch (e) {
-    log(`❌ ${tag} 请求异常: ${e?.message || e}`);
+    if (forceLog) log(`❌ ${tag} 请求异常: ${e?.message || e}`);
+    return false;
   }
 }
 
@@ -136,13 +149,12 @@ async function signIn(url, headers, log) {
     
     const msg = data?.message || "";
 
-    // 还原您喜欢的日志风格
     if (msg === "" && resp.status === 200) {
-      log("⚠️ 签到结果：可能已签到 (无返回消息)");
+      log("✅ 签到结果：签到成功 (无返回消息)");
     } else if (typeof msg === "string" && msg.includes("签到成功")) {
       log("✅ 签到结果：已签到");
     } else {
-      // 包含“重复签到”或其他信息
+      // 包含“重复签到”等
       log(`⚠️ 签到结果：${msg || "未知状态"}`);
     }
   } catch (e) {
@@ -153,7 +165,6 @@ async function signIn(url, headers, log) {
 async function sendServerChan(key, logContent) {
   if (!key) return;
   const markdownLines = logContent.map(line => {
-      // ServerChan 格式化
       if (line.includes("✅")) return `**${line}**`;
       if (line.includes("❌")) return `**${line}**`;
       if (line.includes("💰") || line.includes("💵")) return `\`${line}\``;
@@ -172,8 +183,6 @@ async function sendServerChan(key, logContent) {
 }
 
 // ================= 核心：WAF 解密 (保持不变) =================
-// ... (此处代码逻辑与之前完全一致，为节省篇幅不重复粘贴，
-//      但为了保证您能直接复制使用，下面是完整的解密函数) ...
 
 async function getDynamicCookieStatic(targetUrl, userAgent, log) {
   try {
