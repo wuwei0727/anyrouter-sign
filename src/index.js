@@ -4,20 +4,18 @@ export default {
   },
 
   async fetch(req, env, ctx) {
-    // 过滤 favicon，防止跑两次
     const url = new URL(req.url);
     if (url.pathname.includes("favicon.ico")) {
       return new Response(null, { status: 204 });
     }
-    
     ctx.waitUntil(main(env));
-    return new Response("Task started. Check ServerChan for results.", {
+    return new Response("Task started.", {
       headers: { "Content-Type": "text/plain; charset=utf-8" }
     });
   },
 };
 
-// 模拟延时函数 (关键修改)
+// 辅助工具：静默等待
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main(env) {
@@ -38,8 +36,7 @@ async function main(env) {
     logContent.push(String(s));
   };
 
-  log(`⏰ 北京时间: ${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`);
-  log("--------------------");
+  log(`* 正在尝试绕过阿里云 WAF...`); // 保持简洁
 
   if (!NEW_API_USER || !USER_COOKIE) {
     log("❌ 缺少环境变量 NEW_API_USER 或 COOKIE");
@@ -47,7 +44,6 @@ async function main(env) {
   }
 
   // ================= 1. WAF 绕过逻辑 =================
-  log("[*] 正在尝试绕过阿里云 WAF...");
   let finalCookie = USER_COOKIE;
   
   const { cookie: wafCookie, error: wafError } = await getDynamicCookieStatic(SELF_INFO_URL, USER_AGENT, log);
@@ -55,8 +51,8 @@ async function main(env) {
   if (wafError) {
     log(`❌ WAF 算号失败: ${wafError}`);
   } else if (wafCookie && wafCookie !== 'ALREADY_PASS') {
-    log(`✅ WAF Token 获取成功: ${wafCookie.substring(0, 25)}...`);
-    // 确保 Cookie 格式正确，中间加分号和空格
+    // 还原：显示完整 Token，不截断
+    log(`✅ WAF Token 获取成功: ${wafCookie}`);
     finalCookie = `${wafCookie}; ${USER_COOKIE}`;
   } else {
     log("✅ 无需 WAF 验证或已通过");
@@ -71,36 +67,35 @@ async function main(env) {
     "Referer": BASE_URL + "/",
   };
 
-  // ================= 2. 执行业务 (增加延时) =================
+  // 关键修复：拿到 Token 后静默等待 1 秒，让 WAF "喘口气"，防止第一个请求被秒杀
+  await sleep(1000);
+
+  // ================= 2. 执行业务 (静默延时，不输出 log) =================
   
-  // 查签到前余额
+  // 1. 签到前查询
   await queryBalance("签到前", SELF_INFO_URL, headers, log);
   
-  log("--------------------");
-  log("⏳ 等待 2 秒，防止 WAF 拦截...");
-  await sleep(2000); // 关键：暂停2秒
+  await sleep(2000); // 静默等待
 
-  // 执行签到
+  // 2. 执行签到
   await signIn(SIGN_IN_URL, headers, log);
   
-  log("--------------------");
-  log("⏳ 等待 2 秒，准备刷新余额...");
-  await sleep(2000); // 关键：暂停2秒
+  await sleep(2000); // 静默等待
 
-  // 查签到后余额
+  // 3. 签到后查询
   await queryBalance("签到后", SELF_INFO_URL, headers, log);
 
   await sendServerChan(SERVERCHAN_SENDKEY, logContent);
 }
 
-// ================= 业务函数 =================
+// ================= 业务函数 (已净化日志) =================
 
 async function queryBalance(tag, url, headers, log) {
   try {
     const resp = await fetch(url, { method: "GET", headers });
     const text = await resp.text();
     
-    // WAF 拦截判断
+    // 拦截判断
     if (text.includes("acw_sc__v2") && text.includes("arg1")) {
          log(`❌ ${tag} 被 WAF 拦截 (Cookie 无效)`);
          return;
@@ -111,15 +106,14 @@ async function queryBalance(tag, url, headers, log) {
 
     if (data && data.success) {
         const quota = Number(data.data.quota);
-        const balance = quota / 500000; // 假设汇率
+        const balance = quota / 500000;
+        // 保持您喜欢的格式
         log(`💰 ${tag} Quota: ${quota}`);
         log(`💵 ${tag} 余额: $${balance.toFixed(2)}`);
     } else {
-        // 只有不包含 html 且 status!=200 才报错，避免误报
-        if (!text.includes("html") && resp.status !== 200) {
-            log(`⚠️ ${tag} 接口异常: ${text.slice(0, 60)}`);
-        } else if (resp.status === 200 && !data) {
-             log(`⚠️ ${tag} 解析失败，但 HTTP 200`);
+        // 只有出错才显示详细信息，否则保持安静
+        if (resp.status !== 200) {
+            log(`⚠️ ${tag} 接口异常 (HTTP ${resp.status}): ${text.slice(0, 50)}`);
         }
     }
   } catch (e) {
@@ -142,25 +136,14 @@ async function signIn(url, headers, log) {
     
     const msg = data?.message || "";
 
-    // === 优化后的判断逻辑 ===
-    // 1. 明确的成功消息
-    if (typeof msg === "string" && msg.includes("签到成功")) {
-      log("✅ 签到结果：已签到 (Success)");
-    } 
-    // 2. HTTP 200 且内容为空，通常也是成功
-    else if (msg === "" && resp.status === 200) {
-      log("✅ 签到结果：签到成功 (无返回消息)");
-    } 
-    // 3. 其他消息
-    else {
-      // 这里的消息可能是 "已经签到过了" 或者 错误信息
-      const displayMsg = msg || text.slice(0, 50);
-      // 如果包含“已签到”字样，也算绿色的 info
-      if(displayMsg.includes("已") || displayMsg.includes("重复")) {
-         log(`✅ 签到结果：${displayMsg}`);
-      } else {
-         log(`ℹ️ 签到结果：${displayMsg}`);
-      }
+    // 还原您喜欢的日志风格
+    if (msg === "" && resp.status === 200) {
+      log("⚠️ 签到结果：可能已签到 (无返回消息)");
+    } else if (typeof msg === "string" && msg.includes("签到成功")) {
+      log("✅ 签到结果：已签到");
+    } else {
+      // 包含“重复签到”或其他信息
+      log(`⚠️ 签到结果：${msg || "未知状态"}`);
     }
   } catch (e) {
     log(`❌ 签到异常: ${e?.message || e}`);
@@ -170,13 +153,14 @@ async function signIn(url, headers, log) {
 async function sendServerChan(key, logContent) {
   if (!key) return;
   const markdownLines = logContent.map(line => {
+      // ServerChan 格式化
       if (line.includes("✅")) return `**${line}**`;
       if (line.includes("❌")) return `**${line}**`;
       if (line.includes("💰") || line.includes("💵")) return `\`${line}\``;
       return line;
   });
 
-  const title = logContent.some(l => l.includes("✅ 签到")) ? "AnyRouter 签到成功" : "AnyRouter 执行通知";
+  const title = logContent.some(l => l.includes("✅") || l.includes("签到成功")) ? "AnyRouter 签到成功" : "AnyRouter 执行通知";
   const desp = markdownLines.join("\n\n");
   const params = new URLSearchParams({ title, desp });
 
@@ -187,7 +171,9 @@ async function sendServerChan(key, logContent) {
   }).catch((e) => console.log("推送失败", e));
 }
 
-// ================= 核心：针对性静态解密 =================
+// ================= 核心：WAF 解密 (保持不变) =================
+// ... (此处代码逻辑与之前完全一致，为节省篇幅不重复粘贴，
+//      但为了保证您能直接复制使用，下面是完整的解密函数) ...
 
 async function getDynamicCookieStatic(targetUrl, userAgent, log) {
   try {
@@ -195,7 +181,6 @@ async function getDynamicCookieStatic(targetUrl, userAgent, log) {
       method: 'GET',
       headers: { 'User-Agent': userAgent, 'Accept': 'text/html' },
     });
-
     const html = await challengeResp.text();
     if (!html.includes('acw_sc__v2') && !html.includes('arg1')) {
        return { cookie: 'ALREADY_PASS', error: null };
@@ -211,13 +196,10 @@ function solveWafSpecific(html, log) {
     const arg1Match = html.match(/var\s+arg1\s*=\s*['"]([^'"]+)['"]/);
     if (!arg1Match) return { cookie: null, error: 'Cannot find arg1' };
     const arg1 = arg1Match[1];
-
     const arrayBlockMatch = html.match(/var\s+N\s*=\s*\[([\s\S]*?)\];/);
     if (!arrayBlockMatch) return { cookie: null, error: 'Cannot find Array N' };
-    
     const rawArrayStr = arrayBlockMatch[1];
     const stringArray = rawArrayStr.split(/,\s*(?=['"])/).map(s => s.replace(/^['"]|['"]$/g, '').trim());
-
     let arg2 = null;
     for (const encodedStr of stringArray) {
         try {
@@ -229,24 +211,18 @@ function solveWafSpecific(html, log) {
         } catch (e) {}
     }
     if (!arg2) {
-        if (stringArray.length > 26) {
-             arg2 = decodeBase64Obfuscated(stringArray[26]);
-        }
+        if (stringArray.length > 26) arg2 = decodeBase64Obfuscated(stringArray[26]);
     }
     if (!arg2) return { cookie: null, error: 'Cannot find decoded Key (arg2)' };
-
     const mappingMatch = html.match(/var\s+m\s*=\s*\[((?:\s*0x[0-9a-fA-F]+,?\s*)+)\]/);
     if (!mappingMatch) return { cookie: null, error: 'Cannot find mapping array m' };
-    
     const mappingArray = mappingMatch[1].split(',').map(s => parseInt(s.trim()));
-
     let permutedStr = "";
     for (let i = 0; i < mappingArray.length; i++) {
         const index = mappingArray[i] - 1; 
         if (index >= 0 && index < arg1.length) permutedStr += arg1[index];
         else permutedStr += arg1[i] || "";
     }
-
     let result = "";
     for (let i = 0; i < permutedStr.length && i < arg2.length; i += 2) {
         const v1 = parseInt(permutedStr.slice(i, i + 2), 16);
