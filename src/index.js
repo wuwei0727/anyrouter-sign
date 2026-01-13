@@ -3,7 +3,6 @@ export default {
     ctx.waitUntil(main(env));
   },
 
-  // 手动触发入口
   async fetch(req, env, ctx) {
     ctx.waitUntil(main(env));
     return new Response("Task started. Check ServerChan for results.");
@@ -14,7 +13,7 @@ async function main(env) {
   const BASE_URL = "https://anyrouter.top";
   const SIGN_IN_URL = `${BASE_URL}/api/user/sign_in`;
   const SELF_INFO_URL = `${BASE_URL}/api/user/self`;
-  // 保持 UA 一致，这对于过 WAF 很重要
+  
   const USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
@@ -33,34 +32,28 @@ async function main(env) {
 
   if (!NEW_API_USER || !USER_COOKIE) {
     log("❌ 缺少环境变量 NEW_API_USER 或 COOKIE");
-    await sendServerChan(SERVERCHAN_SENDKEY, logContent);
     return;
   }
 
-  // ================= 1. WAF 绕过逻辑开始 =================
+  // ================= 1. WAF 绕过逻辑 (Base64 解混淆版) =================
   log("[*] 正在尝试绕过阿里云 WAF...");
   let finalCookie = USER_COOKIE;
   
-  // 尝试获取 WAF cookie
-  const { cookie: wafCookie, error: wafError } = await getDynamicCookie(SELF_INFO_URL, USER_AGENT);
+  const { cookie: wafCookie, error: wafError } = await getDynamicCookieStatic(SELF_INFO_URL, USER_AGENT, log);
 
   if (wafError) {
-    log(`❌ WAF 验证失败: ${wafError}`);
-    // 如果 WAF 失败，根据情况决定是否终止。通常拿不到 WAF cookie 后续必挂，但也可能运气好直接通了。
-    // 这里选择记录错误但继续尝试（使用原始 cookie）
+    log(`❌ WAF 算号失败: ${wafError}`);
   } else if (wafCookie && wafCookie !== 'ALREADY_PASS') {
-    log(`✅ WAF Token 获取成功: ${wafCookie.substring(0, 15)}...`);
-    // 合并 Cookie
+    log(`✅ WAF Token 获取成功: ${wafCookie.substring(0, 20)}...`);
     finalCookie = `${wafCookie}; ${USER_COOKIE}`;
   } else {
     log("✅ 无需 WAF 验证或已通过");
   }
-  // ================= WAF 绕过逻辑结束 =================
 
   const headers = {
     "Content-Type": "application/json",
     "New-Api-User": NEW_API_USER,
-    "Cookie": finalCookie, // 使用合并后的 Cookie
+    "Cookie": finalCookie,
     "User-Agent": USER_AGENT,
     "Origin": BASE_URL,
     "Referer": BASE_URL + "/",
@@ -82,16 +75,20 @@ async function queryBalance(tag, url, headers, log) {
     const resp = await fetch(url, { method: "GET", headers });
     log(`${tag} HTTP ${resp.status}`);
     
-    // 如果返回 405/403，说明 WAF 可能没过
-    if (resp.status === 405 || resp.status === 403) {
-      const text = await resp.text();
-      log(`❌ ${tag} 被拦截 (WAF?): ${text.slice(0, 50)}`);
-      return;
+    const contentType = resp.headers.get("content-type") || "";
+    if (resp.status !== 200 || contentType.includes("html")) {
+        const text = await resp.text();
+        if(text.includes("acw_sc__v2")) {
+             log(`❌ ${tag} 被 WAF 拦截 (Cookie 无效)`);
+        } else {
+             log(`⚠️ ${tag} 异常返回: ${text.slice(0, 60)}`);
+        }
+        return;
     }
 
     const data = await resp.json().catch(() => null);
     if (!data?.success) {
-      log(`⚠️ ${tag} 接口未成功: ${data?.message || "未知错误"}`);
+      log(`⚠️ ${tag} 接口失败: ${data?.message || "未知错误"}`);
       return;
     }
     const quota = Number(data.data.quota);
@@ -99,7 +96,7 @@ async function queryBalance(tag, url, headers, log) {
     log(`💰 ${tag} Quota: ${quota}`);
     log(`💵 ${tag} 余额: $${balance.toFixed(2)}`);
   } catch (e) {
-    log(`❌ ${tag} 查询异常: ${e?.message || e}`);
+    log(`❌ ${tag} 请求异常: ${e?.message || e}`);
   }
 }
 
@@ -108,10 +105,15 @@ async function signIn(url, headers, log) {
     const resp = await fetch(url, { method: "POST", headers });
     const text = await resp.text();
     log(`签到 HTTP ${resp.status}`);
+    
+    if (text.includes("acw_sc__v2")) {
+        log(`❌ 签到请求被 WAF 拦截`);
+        return;
+    }
+
     let data = null;
     try { data = JSON.parse(text); } catch {}
     
-    // 优先取 message，如果没有则截取部分 body
     const msg = data?.message ?? text?.slice(0, 80);
     log(`ℹ️ 签到返回：${msg}`);
   } catch (e) {
@@ -121,7 +123,6 @@ async function signIn(url, headers, log) {
 
 async function sendServerChan(key, logContent) {
   if (!key) return;
-  // 简单的 Markdown 格式化
   const markdownLines = logContent.map(line => {
       if (line.includes("✅")) return `**${line}**`;
       if (line.includes("❌")) return `**${line}**`;
@@ -140,101 +141,147 @@ async function sendServerChan(key, logContent) {
   }).catch((e) => console.log("推送失败", e));
 }
 
-// ================= WAF 解密核心逻辑 (移植版) =================
+// ================= 核心：针对性静态解密 =================
 
-async function getDynamicCookie(targetUrl, userAgent) {
+async function getDynamicCookieStatic(targetUrl, userAgent, log) {
   try {
     const challengeResp = await fetch(targetUrl, {
       method: 'GET',
-      headers: {
-        'User-Agent': userAgent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
+      headers: { 'User-Agent': userAgent, 'Accept': 'text/html' },
     });
 
-    // 如果直接请求成功（200且是JSON），说明没盾，或者是API数据
-    // 注意：有时候 WAF 也会返回 200，但 Content-Type 是 html
-    const contentType = challengeResp.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-        return { cookie: 'ALREADY_PASS', error: null };
-    }
-
     const html = await challengeResp.text();
-    if (!html.includes('<script')) {
-       // 没有脚本，可能是已经过了或者报错
+    if (!html.includes('acw_sc__v2') && !html.includes('arg1')) {
        return { cookie: 'ALREADY_PASS', error: null };
     }
-    return extractCookieFromHtml(html, userAgent);
+    
+    return solveWafSpecific(html, log);
+
   } catch (err) {
     return { cookie: null, error: String(err) };
   }
 }
 
-function extractCookieFromHtml(html, userAgent) {
-  const scriptRegex = /<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/gi;
-  const scripts = [...html.matchAll(scriptRegex)];
-  
-  if (!scripts.length) return { cookie: null, error: 'no inline <script> tags found' };
+/**
+ * 针对性解密器：直接解析混淆数组并提取 Key
+ */
+function solveWafSpecific(html, log) {
+  try {
+    // 1. 提取 arg1
+    const arg1Match = html.match(/var\s+arg1\s*=\s*['"]([^'"]+)['"]/);
+    if (!arg1Match) return { cookie: null, error: 'Cannot find arg1' };
+    const arg1 = arg1Match[1];
 
-  let lastError = null;
-  for (const match of scripts) {
-    const scriptContent = match[1];
-    // 阿里云 WAF 特征
-    if (scriptContent.includes('arg1') || scriptContent.includes('eval') || scriptContent.length > 500) {
-        const { cookie, error } = executeScriptForCookie(scriptContent, userAgent);
-        if (cookie) return { cookie, error: null };
-        lastError = error;
+    // 2. 提取大数组 (N)
+    // 匹配 function a0i(){var N=['...'];a0i=...}
+    const arrayBlockMatch = html.match(/var\s+N\s*=\s*\[([\s\S]*?)\];/);
+    if (!arrayBlockMatch) return { cookie: null, error: 'Cannot find Array N' };
+    
+    // 清理并解析数组内容
+    // 数组元素类似于 'mJKZmgTStNvVyq', 'C3rYAw5N'
+    const rawArrayStr = arrayBlockMatch[1];
+    const stringArray = rawArrayStr.split(/,\s*(?=['"])/).map(s => s.replace(/^['"]|['"]$/g, '').trim());
+
+    // 3. 提取 Key (arg2)
+    // 代码逻辑是 p = L(0x115)。偏移量通常是 0xfb (251)。
+    // 0x115 (277) - 0xfb (251) = 26 (这是数组下标)
+    // 但为了保险，我们不硬编码下标，而是遍历解码整个数组，找那个 40位 HEX 字符串
+    
+    let arg2 = null;
+    
+    for (const encodedStr of stringArray) {
+        try {
+            const decoded = decodeBase64Obfuscated(encodedStr);
+            // 特征：40位 HEX，且不是 arg1
+            if (decoded.length === 40 && /^[0-9a-fA-F]+$/.test(decoded) && decoded !== arg1) {
+                arg2 = decoded;
+                break;
+            }
+        } catch (e) {
+            // 忽略解码错误
+        }
     }
+
+    if (!arg2) {
+        // 如果解码找不到，尝试硬编码查找（假设 index 26）
+        // 注意：0x115 - 0xfb = 26.
+        if (stringArray.length > 26) {
+             const val = decodeBase64Obfuscated(stringArray[26]);
+             log(`⚠️ 尝试硬编码提取 Key: ${val}`);
+             // 即使不是 40位 HEX，也试一试
+             arg2 = val;
+        }
+    }
+
+    if (!arg2) return { cookie: null, error: 'Cannot find decoded Key (arg2)' };
+
+    // 4. 提取置换数组 (Mapping Array)
+    // 位于: var m=[0xf,0x23,...]
+    const mappingMatch = html.match(/var\s+m\s*=\s*\[((?:\s*0x[0-9a-fA-F]+,?\s*)+)\]/);
+    if (!mappingMatch) return { cookie: null, error: 'Cannot find mapping array m' };
+    
+    const mappingArray = mappingMatch[1].split(',').map(s => parseInt(s.trim()));
+    if (mappingArray.length !== 40) return { cookie: null, error: 'Mapping array length invalid' };
+
+    // 5. 解密计算
+    let permutedStr = "";
+    for (let i = 0; i < mappingArray.length; i++) {
+        const index = mappingArray[i] - 1; 
+        if (index >= 0 && index < arg1.length) permutedStr += arg1[index];
+        else permutedStr += arg1[i] || "";
+    }
+
+    let result = "";
+    for (let i = 0; i < permutedStr.length && i < arg2.length; i += 2) {
+        const v1 = parseInt(permutedStr.slice(i, i + 2), 16);
+        const v2 = parseInt(arg2.slice(i, i + 2), 16);
+        const xorVal = v1 ^ v2;
+        result += (xorVal < 16 ? '0' : '') + xorVal.toString(16);
+    }
+
+    return { cookie: `acw_sc__v2=${result}`, error: null };
+
+  } catch (e) {
+    return { cookie: null, error: 'Specific solve failed: ' + e.message };
   }
-  return { cookie: null, error: lastError || 'no cookie produced' };
 }
 
-function executeScriptForCookie(scriptContent, userAgent) {
-  let cookieValue = null;
-  
-  // 模拟浏览器环境
-  const windowMock = {};
-  const documentMock = {
-    _cookie: '',
-    set cookie(val) {
-      if (val.includes('acw_sc__v2')) {
-        cookieValue = val.split(';')[0];
-      }
-    },
-    get cookie() { return this._cookie; },
-    location: { reload() {}, href: 'http://anyrouter.top/', protocol: 'http:', host: 'anyrouter.top' },
-    addEventListener: () => {},
-    attachEvent: () => {},
-  };
-  const navigatorMock = { 
-      userAgent: userAgent, 
-      appVersion: '5.0 (Windows)', 
-      webdriver: false 
-  };
-  const screenMock = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1040, colorDepth: 24 };
-
-  try {
-    // 使用 new Function 执行 WAF 混淆代码
-    const run = new Function('window', 'document', 'location', 'navigator', 'screen', `
-      try { 
-        ${scriptContent} 
-      } catch(e) { }
-    `);
+/**
+ * 模拟混淆代码中的 Base64 解码逻辑
+ * 对应代码中的 function g(l) {...}
+ */
+function decodeBase64Obfuscated(l) {
+    const table = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=';
+    let n = '';
+    let o = '';
     
-    // 绑定 Mock 对象
-    windowMock.window = windowMock;
-    windowMock.document = documentMock;
-    windowMock.location = documentMock.location;
-    windowMock.navigator = navigatorMock;
-    windowMock.screen = screenMock;
+    // 1. 标准 Base64 解码流程
+    for (let q = 0, r, s, t = 0; (s = l.charAt(t++)); ) {
+        s = table.indexOf(s);
+        if (s === -1) continue;
+        
+        r = q % 4 ? r * 64 + s : s;
+        if (q++ % 4) {
+            // 将解出的 24bit 数据拆分成 8bit
+            // 0xff & r >> (-2 * q & 6)
+            // 逻辑简化：标准 Base64 解码
+            const charCode = 255 & (r >> ((-2 * q) & 6));
+            if (charCode !== 0) { // 简单处理 padding
+               n += String.fromCharCode(charCode);
+            }
+        }
+    }
 
-    run(windowMock, documentMock, documentMock.location, navigatorMock, screenMock);
-  } catch (err) {
-    return { cookie: null, error: 'Eval error: ' + String(err) };
-  }
-
-  if (cookieValue) {
-    return { cookie: cookieValue, error: null };
-  }
-  return { cookie: null, error: 'script executed but cookie not set' };
+    // 2. URL Decode (代码逻辑: loop n -> o += %XX -> decodeURIComponent)
+    for (let u = 0; u < n.length; u++) {
+        let hex = n.charCodeAt(u).toString(16);
+        if (hex.length < 2) hex = '0' + hex;
+        o += '%' + hex;
+    }
+    
+    try {
+        return decodeURIComponent(o);
+    } catch(e) {
+        return n; // Fallback
+    }
 }
