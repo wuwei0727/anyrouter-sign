@@ -8,6 +8,9 @@ crons = [
   "0 11 * * SAT,SUN"   # 北京时间 周六/周日 19:00
 ]
 
+# 关键：避免部署时清空你在 Dashboard 配的 vars
+keep_vars = true
+
 [observability]
 [observability.logs]
 enabled = true
