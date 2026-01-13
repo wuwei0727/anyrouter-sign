@@ -11,6 +11,7 @@ export default {
 
 async function main(env) {
   const BASE_URL = "https://anyrouter.top";
+  const BASE_URL1 = "https://anyrouter.top";
   const SIGN_IN_URL = `${BASE_URL}/api/user/sign_in`;
   const SELF_INFO_URL = `${BASE_URL}/api/user/self`;
   
