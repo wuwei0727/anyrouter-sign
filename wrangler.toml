@@ -7,3 +7,8 @@ crons = [
   "0 2 * * MON-FRI",   # 北京时间 周一~周五 10:00
   "0 11 * * SAT,SUN"   # 北京时间 周六/周日 19:00
 ]
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true
