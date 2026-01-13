@@ -4,8 +4,16 @@ export default {
   },
 
   async fetch(req, env, ctx) {
+    // 过滤 favicon 请求，防止浏览器访问时执行两次
+    const url = new URL(req.url);
+    if (url.pathname.includes("favicon.ico")) {
+      return new Response(null, { status: 204 });
+    }
+    
     ctx.waitUntil(main(env));
-    return new Response("Task started. Check ServerChan for results.");
+    return new Response("Task started. Check ServerChan for results.", {
+      headers: { "Content-Type": "text/plain; charset=utf-8" }
+    });
   },
 };
 
@@ -68,33 +76,40 @@ async function main(env) {
   await sendServerChan(SERVERCHAN_SENDKEY, logContent);
 }
 
-// ================= 业务函数 =================
+// ================= 业务函数 (已优化) =================
 
 async function queryBalance(tag, url, headers, log) {
   try {
     const resp = await fetch(url, { method: "GET", headers });
+    const text = await resp.text(); // 先获取文本，不依赖 Header 判断
     log(`${tag} HTTP ${resp.status}`);
     
-    const contentType = resp.headers.get("content-type") || "";
-    if (resp.status !== 200 || contentType.includes("html")) {
-        const text = await resp.text();
-        if(text.includes("acw_sc__v2")) {
-             log(`❌ ${tag} 被 WAF 拦截 (Cookie 无效)`);
-        } else {
-             log(`⚠️ ${tag} 异常返回: ${text.slice(0, 60)}`);
-        }
-        return;
+    // 1. 优先尝试解析 JSON
+    let data = null;
+    try {
+        data = JSON.parse(text);
+    } catch (e) {
+        // 解析失败，说明可能不是 JSON
     }
 
-    const data = await resp.json().catch(() => null);
-    if (!data?.success) {
-      log(`⚠️ ${tag} 接口失败: ${data?.message || "未知错误"}`);
-      return;
+    // 2. 检查是否被 WAF 拦截 (特征字符串 + 解析失败)
+    // 只有当 JSON 解析失败 或者 明确包含 WAF 混淆代码时才认为是 WAF
+    if (text.includes("acw_sc__v2") && text.includes("arg1")) {
+         log(`❌ ${tag} 被 WAF 拦截 (Cookie 无效)`);
+         return;
     }
-    const quota = Number(data.data.quota);
-    const balance = quota / 500000;
-    log(`💰 ${tag} Quota: ${quota}`);
-    log(`💵 ${tag} 余额: $${balance.toFixed(2)}`);
+
+    // 3. 处理正常业务逻辑
+    if (data && data.success) {
+        const quota = Number(data.data.quota);
+        const balance = quota / 500000;
+        log(`💰 ${tag} Quota: ${quota}`);
+        log(`💵 ${tag} 余额: $${balance.toFixed(2)}`);
+    } else {
+        // 虽然不是 WAF，但接口报错
+        const errMsg = data?.message || text.slice(0, 60);
+        log(`⚠️ ${tag} 接口异常: ${errMsg}`);
+    }
   } catch (e) {
     log(`❌ ${tag} 请求异常: ${e?.message || e}`);
   }
@@ -106,16 +121,30 @@ async function signIn(url, headers, log) {
     const text = await resp.text();
     log(`签到 HTTP ${resp.status}`);
     
-    if (text.includes("acw_sc__v2")) {
+    // 1. WAF 拦截检查
+    if (text.includes("acw_sc__v2") && text.includes("arg1")) {
         log(`❌ 签到请求被 WAF 拦截`);
         return;
     }
 
+    // 2. 尝试解析 JSON
     let data = null;
     try { data = JSON.parse(text); } catch {}
     
-    const msg = data?.message ?? text?.slice(0, 80);
-    log(`ℹ️ 签到返回：${msg}`);
+    const msg = data?.message || "";
+
+    // 3. 按照你的要求优化日志输出
+    if (typeof msg === "string" && msg.includes("签到成功")) {
+      log("✅ 签到结果：已签到");
+    } else if (msg === "" && resp.status === 200) {
+      // 有些接口成功但不返回 message，或者返回空串
+      log("⚠️ 签到结果：可能已签到 (无返回消息)");
+    } else {
+      // 其他情况（包括错误信息 或 已经签到过等）
+      const displayMsg = msg || text.slice(0, 50);
+      log(`ℹ️ 签到结果：${displayMsg}`);
+    }
+
   } catch (e) {
     log(`❌ 签到异常: ${e?.message || e}`);
   }
@@ -130,7 +159,8 @@ async function sendServerChan(key, logContent) {
       return line;
   });
 
-  const title = logContent.some(l => l.includes("✅ 签到")) ? "AnyRouter 签到成功" : "AnyRouter 通知";
+  // 标题逻辑：只要有签到成功的字样，或者 Quota 显示正常，都算通知
+  const title = logContent.some(l => l.includes("✅ 签到")) ? "AnyRouter 签到成功" : "AnyRouter 执行通知";
   const desp = markdownLines.join("\n\n");
   const params = new URLSearchParams({ title, desp });
 
@@ -141,7 +171,7 @@ async function sendServerChan(key, logContent) {
   }).catch((e) => console.log("推送失败", e));
 }
 
-// ================= 核心：针对性静态解密 =================
+// ================= 核心：针对性静态解密 (保持不变) =================
 
 async function getDynamicCookieStatic(targetUrl, userAgent, log) {
   try {
@@ -151,6 +181,7 @@ async function getDynamicCookieStatic(targetUrl, userAgent, log) {
     });
 
     const html = await challengeResp.text();
+    // 只有同时包含这两个特征才确实是 WAF 页面，防止误判
     if (!html.includes('acw_sc__v2') && !html.includes('arg1')) {
        return { cookie: 'ALREADY_PASS', error: null };
     }
@@ -162,68 +193,46 @@ async function getDynamicCookieStatic(targetUrl, userAgent, log) {
   }
 }
 
-/**
- * 针对性解密器：直接解析混淆数组并提取 Key
- */
 function solveWafSpecific(html, log) {
   try {
-    // 1. 提取 arg1
     const arg1Match = html.match(/var\s+arg1\s*=\s*['"]([^'"]+)['"]/);
     if (!arg1Match) return { cookie: null, error: 'Cannot find arg1' };
     const arg1 = arg1Match[1];
 
-    // 2. 提取大数组 (N)
-    // 匹配 function a0i(){var N=['...'];a0i=...}
     const arrayBlockMatch = html.match(/var\s+N\s*=\s*\[([\s\S]*?)\];/);
     if (!arrayBlockMatch) return { cookie: null, error: 'Cannot find Array N' };
     
-    // 清理并解析数组内容
-    // 数组元素类似于 'mJKZmgTStNvVyq', 'C3rYAw5N'
     const rawArrayStr = arrayBlockMatch[1];
     const stringArray = rawArrayStr.split(/,\s*(?=['"])/).map(s => s.replace(/^['"]|['"]$/g, '').trim());
 
-    // 3. 提取 Key (arg2)
-    // 代码逻辑是 p = L(0x115)。偏移量通常是 0xfb (251)。
-    // 0x115 (277) - 0xfb (251) = 26 (这是数组下标)
-    // 但为了保险，我们不硬编码下标，而是遍历解码整个数组，找那个 40位 HEX 字符串
-    
     let arg2 = null;
     
     for (const encodedStr of stringArray) {
         try {
             const decoded = decodeBase64Obfuscated(encodedStr);
-            // 特征：40位 HEX，且不是 arg1
             if (decoded.length === 40 && /^[0-9a-fA-F]+$/.test(decoded) && decoded !== arg1) {
                 arg2 = decoded;
                 break;
             }
-        } catch (e) {
-            // 忽略解码错误
-        }
+        } catch (e) {}
     }
 
     if (!arg2) {
-        // 如果解码找不到，尝试硬编码查找（假设 index 26）
-        // 注意：0x115 - 0xfb = 26.
         if (stringArray.length > 26) {
              const val = decodeBase64Obfuscated(stringArray[26]);
              log(`⚠️ 尝试硬编码提取 Key: ${val}`);
-             // 即使不是 40位 HEX，也试一试
              arg2 = val;
         }
     }
 
     if (!arg2) return { cookie: null, error: 'Cannot find decoded Key (arg2)' };
 
-    // 4. 提取置换数组 (Mapping Array)
-    // 位于: var m=[0xf,0x23,...]
     const mappingMatch = html.match(/var\s+m\s*=\s*\[((?:\s*0x[0-9a-fA-F]+,?\s*)+)\]/);
     if (!mappingMatch) return { cookie: null, error: 'Cannot find mapping array m' };
     
     const mappingArray = mappingMatch[1].split(',').map(s => parseInt(s.trim()));
     if (mappingArray.length !== 40) return { cookie: null, error: 'Mapping array length invalid' };
 
-    // 5. 解密计算
     let permutedStr = "";
     for (let i = 0; i < mappingArray.length; i++) {
         const index = mappingArray[i] - 1; 
@@ -246,42 +255,23 @@ function solveWafSpecific(html, log) {
   }
 }
 
-/**
- * 模拟混淆代码中的 Base64 解码逻辑
- * 对应代码中的 function g(l) {...}
- */
 function decodeBase64Obfuscated(l) {
     const table = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=';
     let n = '';
     let o = '';
-    
-    // 1. 标准 Base64 解码流程
     for (let q = 0, r, s, t = 0; (s = l.charAt(t++)); ) {
         s = table.indexOf(s);
         if (s === -1) continue;
-        
         r = q % 4 ? r * 64 + s : s;
         if (q++ % 4) {
-            // 将解出的 24bit 数据拆分成 8bit
-            // 0xff & r >> (-2 * q & 6)
-            // 逻辑简化：标准 Base64 解码
             const charCode = 255 & (r >> ((-2 * q) & 6));
-            if (charCode !== 0) { // 简单处理 padding
-               n += String.fromCharCode(charCode);
-            }
+            if (charCode !== 0) n += String.fromCharCode(charCode);
         }
     }
-
-    // 2. URL Decode (代码逻辑: loop n -> o += %XX -> decodeURIComponent)
     for (let u = 0; u < n.length; u++) {
         let hex = n.charCodeAt(u).toString(16);
         if (hex.length < 2) hex = '0' + hex;
         o += '%' + hex;
     }
-    
-    try {
-        return decodeURIComponent(o);
-    } catch(e) {
-        return n; // Fallback
-    }
+    try { return decodeURIComponent(o); } catch(e) { return n; }
 }
